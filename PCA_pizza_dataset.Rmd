@@ -1,0 +1,310 @@
+---
+title: "Dimensionality Reduction of pizza dataset"
+author: "Artur Skowroński"
+date: "13 12 2021"
+output: html_document
+---
+## Introduction
+
+The aim of this article is to use PCA and T-SNE method for dimension reduction of pizza dataset. *PCA* method is appropriate for the data, which especially contains continous or quantitative variables. The goal of PCA is to rotate the coordinate system in such a way as to maximize first the variance of the first coordinate, then the variance of the second coordinate, and so on. The coordinate values thus transformed are called the loads of the generated factors (principal components). *T-SNE* is a non-linear technique primarily used for data exploration and visualizing high-dimensional data (I will expand on this issue later). Compared to PCA (founded in 1933), T-SNE can be considered as a fairly new algorithm (2008).
+
+## Libraries and dataset
+```{r Introduction, message=FALSE, warning=FALSE}
+# Data Handling
+library(tidyverse)
+
+# Visualisation
+library(ggplot2)
+library(GGally)
+library(kableExtra)
+
+# PCA
+library(factoextra)
+library(FactoMineR)
+library(gridExtra)
+library(factoextra)
+library(pca3d)
+
+# T-SNE
+library(Rtsne)
+library(scatterplot3d)
+
+# Loading dataset
+pizza_org <- read.csv('Pizza.csv')
+kable(head(pizza_org)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+The dataset was downloaded from this link: https://data.world/sdhilip/pizza-datasets and it contains information on the micronutrients of various pizzas.
+
+The variables in the data set are:
+
+* brand - Pizza brand (class label)
+* id - Sample analised
+* mois - Amount of water per 100 grams in the sample
+* prot - Amount of protein per 100 grams in the sample
+* fat - Amount of fat per 100 grams in the sample
+* ash - Amount of ash per 100 grams in the sample
+* sodium - Amount of sodium per 100 grams in the sample
+* carb - Amount of carbohydrates per 100 grams in the sample
+* cal - Amount of calories per 100 grams in the sample
+
+## Exploratory Data Analysis
+
+Before implementing any Machine Learning algorithm, it is advisable to get know with the data in order to understand it more clearly. In my opinion it is very helpful, because in our future work it is hard to estimate with what kind of data we will have to deal with.
+
+```{r dimension}
+
+dim(pizza_org)
+
+```
+
+```{r summary}
+
+summary(pizza_org) 
+
+```
+
+```{r table}
+
+table(pizza_org$brand) 
+
+
+```
+Let's check if there are any NaN values in the dataset.
+
+```{r check_NA}
+apply(pizza_org[1:length(colnames(pizza_org))],2, anyNA)
+
+```
+As we see, there are no missing values in our dataset.
+
+#### Id variable
+
+At first let me change the name of "id" variable just into "sample".
+It might be good to delve into this variable, because it seems to me that this column should be dropped.
+That's why, I will check the uniqness of this column.
+
+```{r id_uniq}
+
+colnames(pizza_org)[which(names(pizza_org) == "id")] <- c("sample")
+length(unique(pizza_org$sample))
+
+```
+It occured that the number of unique values is not equal to the number of rows. That's why, I have to check whether there are some duplicates.
+
+```{r table_id}
+
+sample_table <- table(pizza_org$sample) == 2
+sample_table[sample_table == TRUE]; sum(sample_table[sample_table == TRUE])
+
+```
+We see that there are 9 values which potentially might be duplicated - let's check this records in the dataset.
+
+```{r id_duplicates}
+
+sample_table_frame <- as.data.frame(sample_table[sample_table == TRUE])
+# Set indexes into the first column
+sample_table_frame <- cbind(newColName = rownames(sample_table_frame), sample_table_frame) 
+rownames(sample_table_frame) <- 1:nrow(sample_table_frame)
+# Get values of potential duplicates
+kable(pizza_org[pizza_org$sample %in% sample_table_frame$newColName,]) %>% 
+  kable_styling()
+
+```
+Well the result is quite tricky, because some records are 1:1 equal (for example sample no. = 24110). These records can be treated as duplicates. However, for some sample values all the other "nutrient" variables are the same. Interestingly, they have been assigned to the other brands, which bake pizzas (for example sample = 24043).
+
+I am aware that deleting records is not always the best way to perform further analysis. However, I'm not entirely sure how the data was derived and I'm afraid that duplicated data may interfere with my subsequent matches. Nevertheless, for the purposes of this exercise, I decided to remove these records. For the data that differs only in the brand column, I decided to leave it unchanged. I don't think that they are incorrect. Perhaps there are some pizzerias, which bake 1:1 the same type of pizza.
+
+```{r remove_duplicates}
+# Making a copy of original dataset, in order to not having the same memory address
+pizza_non_scaled <- data.frame(pizza_org) 
+pizza_non_sc_no_dp <- pizza_non_scaled[!duplicated(pizza_non_scaled), ]
+
+print(paste("The number of removed rows is equal to:", nrow(pizza_org) - nrow(pizza_non_sc_no_dp)))
+      
+```
+Moreover, I will also get rid of sample variable, becasue it seems to me that it does not contribute any additional relevant information about the pizzas.
+
+```{r pizza_without_sample}
+
+pizza <- subset(pizza_non_sc_no_dp, select = -c(sample))
+kable(head(pizza)) %>% 
+  kable_styling()
+# Looks good now
+
+```
+
+#### Visualisations
+
+Now, let's "penetrate" the data and look for some interesting relationships and additional information. This will help me to check, if particular companies make their pizzas with similar nutritional ratios or if there are significant differences from brand to brand.
+
+```{r boxplots, out.width = "200%", out.height = "200%"}
+
+pizza %>% 
+  gather("micronutritions", "value", 2:8) %>% 
+  ggplot(aes(x = brand, y = value, fill = brand)) +
+    geom_boxplot() +
+    ggtitle("Histograms of micronutritions") +
+    xlab("Brands") +
+    ylab("Values") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, size = 14)) +
+    facet_wrap(~ micronutritions, scales = "free")
+
+```
+Looking at the histograms above, we can see that each of the pizzerias has varying macronutrients. The greatest similarity among the pizzerias can be seen in the graph for the variable fat, while the greatest variation undoubtedly concerns the variable mois, which is the amount of water per 100 grams of sample. 
+
+```{r correlation}
+
+cor_pizza <- cor(pizza[, 2:length(pizza)])
+ggcorr(cor_pizza, label = T, label_round = 2)
+
+```
+
+It turns out that for the most part the correlations between variables are high (corr > |0.7|), with with predominantly positive values for this indicator.
+
+## Dimensions reduction
+
+The aim of this chapter is to implement PCA algorithm, in order to reduce the number of the dimensions. Currently, in my dataset there are 8 different variables, so I think that satisfactory number of components should be lower or equal to 4.
+Because of the fact that my data is not on the same scale, I will *standardize* the variables wherever it is possible.
+
+#### Kmeans, PAM - optimal number of clusters
+
+Out of curiosity, before running PCA, at first let's focus on finding the most optimal number of clusters. In order to do that, I will use function factoextra::fviz_nbclust() and apply it into Kmeans and PAM algorithm. Of course, there are some other algorithms of clustering like CLARA, but in my case the dataset is too small, so the results might be unclear.
+
+```{r kmeans_pam}
+
+# Scale the data
+pizza_scaled <- pizza %>% 
+              mutate_if(is.numeric, scale)
+
+# Draw optimal number of clusters for Kmeans and PAM
+opt_kmeans_sill <- fviz_nbclust(pizza_scaled[,-1], FUNcluster = kmeans, method = "silhouette") + theme_classic() +
+  labs(subtitle = "Silhouette method with K-means")
+opt_pam_sill <- fviz_nbclust(pizza_scaled[,-1], FUNcluster = cluster::pam, method = "silhouette") + theme_classic() +
+  labs(subtitle = "Silhouette method with PAM")
+grid.arrange(opt_kmeans_sill, opt_pam_sill, nrow=2)
+```
+
+As we see, the optimal number of clusters is different: for kmeans it is 7 clusters, while for PAM it is 5 clusters. As a reminder, it is worth mentioning that the brand variable has 10 unique values.
+
+## PCA
+
+At first let's implement basic PCA algorithm, in order to see the data will behave.
+
+```{r basic_PCA}
+basic_PCA <- prcomp(pizza[,-1], center = TRUE, scale = TRUE)
+summary(basic_PCA)
+
+```
+
+```{r basic_number_of_dimensions}
+
+fviz_screeplot(basic_PCA, addlabels = TRUE)
+
+```
+
+As a result, we got 3 different statistic, which describes individual component. The most important, seems to be the variance proportion statistic, because it tells us, how much of the total variance a particular component explains. Of course, we expect that as the number of components increases, the value for this statistic will begin to decrease, which is also seen in the example above. In my case, the PC1 explains 59.54% of the total variance, while the PC2 explains only 32.77%. We can also see that the last 3 components have very little influence on the variance explainability, so intuition hints me that it might be worth trying to reduce the data.
+
+
+#### Kaiser criterion
+
+I am definitely not satisfied with the number of obtained principal components, so in this case I will dive into my data and try to reduce more dimensions.
+
+There are a lot of tests, which helps to deal with that problem, however I will use the *Kaiser criterion*.
+This method is based on calculating the eigenvalues. Especially, we are interested in these components for which eigenvalue is **greater than 1**. Having this in mind, let's check if I am able to improve my "reduction quality".
+
+```{r eigenvalue}
+pizza_eigen <- factoextra::get_eigenvalue(basic_PCA)
+pizza_eigen
+```
+Taking into account the Kaiser criterion, only first 3 components seems to be significant. It is consistent with what the graph above showed about the total variance explanation. Having this in mind, I will omit the other components in the following analysis.
+
+#### PCA visualisation
+
+In order to check the effectiveness of the PCA algorithm, below I present the charts for the obtained (in my case three) components.
+
+```{r variable_loadings}
+#library(factoextra)
+
+fviz_pca_var(basic_PCA, col.var = "contrib", repel = TRUE, axes = c(1, 3)) +
+  labs(title="Variables loading for PC1 and PC2", x="PC1", y="PC2")
+
+fviz_pca_var(basic_PCA, col.var = "contrib", repel = TRUE, axes = c(2, 3)) +
+  labs(title="Variables loading for PC2 and PC3", x="PC2", y="PC3")
+```
+
+We can also delve a little bit deeper and check which variable has the biggest impact on dimensional spaces.
+
+```{r}
+
+contrib_plot_1_2 <- fviz_contrib(basic_PCA, choice = "var", axes = 1:2)
+contrib_plot_2_3 <- fviz_contrib(basic_PCA, choice = "var", axes = 2:3)
+
+grid.arrange(contrib_plot_1_2, contrib_plot_2_3)
+
+```
+
+
+
+It is also possible to extend the above graphs by showing the observations in two dimensions with a colored quality representation.
+
+```{r extend_visualisation}
+#library(pca3d)
+gr<-factor(pizza$brand)
+pca2d(basic_PCA, components = 1:2, group = gr, biplot=TRUE, biplot.vars=3, legend = "topleft")
+pca2d(basic_PCA, components = 2:3, group = gr, biplot=TRUE, biplot.vars=3, legend = "topleft")
+
+```
+
+
+#### T-SNE
+
+T-SNE stands for t-Distributed Stochastic Neighbor Embedding. In a nutshell, The t-SNE algorithm calculates a similarity measure between pairs of instances in the high dimensional space and in the low dimensional space. Then, it tries to optimize these two similarity measures using a cost function. The algorithm is able to provide a 2D or 3D visual representation of the data. That's why, it might be useful, in order to better understanding of high-dimensional data or even to classification/regression purposes. 
+
+
+However, using my dataset as an example, it may turn out that I have not presented the whole capabilities of this algorithm. Nevertheless, for the purpose of this exercise and my for self-development, I decided to implement it into my dataset and see how it would work and if it would indicate any differences from PCA.
+
+
+```{r T-SNE}
+#library(Rtsne)
+set.seed(42) # to ensure reproducibility
+
+colors = rainbow(length(unique(pizza_non_sc_no_dp$brand)))
+names(colors) = unique(pizza_non_sc_no_dp$brand)
+
+pizza_matrix <- as.matrix(pizza_non_sc_no_dp[, -1])
+tsne <- Rtsne::Rtsne(pizza_matrix, check_duplicates = FALSE, pca = FALSE, perplexity=30, theta=0.5, dims=3)
+
+plot(tsne$Y, t='n', 
+     main = "Plot of T-SNE", 
+     xlab = "T-SNE 1st dimension", 
+     ylab = "T-SNE 2nd dimension")
+text(tsne$Y, labels=pizza_non_sc_no_dp$brand, col=colors[pizza_non_sc_no_dp$brand])
+
+#library(scatterplot3d)
+scatterplot3d::scatterplot3d(x=tsne$Y[,1],y=tsne$Y[,2],z=tsne$Y[,3], color = colors[pizza_non_sc_no_dp$brand], 
+                             main = "3 dimmensional T-SNE", 
+                             xlab = "T-SNE 1st dimension", 
+                             ylab = "T-SNE 2nd dimension", 
+                             zlab = "T-SNE 3rd dimension")
+legend("topright", legend = c("A","B","C","D","E","F","G","H","I","J"),
+      col =  colors, xpd = TRUE, horiz = FALSE, ncol = 2, pch = 16)
+
+```
+
+## Summary
+
+The main goal of this project was to demonstrate whether pizza types baked by different pizzerias can be somehow described by reducing dimensions. Even for such a non-obvious dataset, the PCA algorithm found that 3 components were sufficient to gather some information of how the data looks like. In the case of T-SNE, it is hard to say that the results were satisfactory because it was not entirely possible to group the data into appropriate clusters. This only confirms, as mentioned before, that for a small dataset this algorithm can create some confusion. Nevertheless, in reality, most of the datasets are much larger and more fixed. In such cases, T-SNE might perform significantly better than PCA.
+
+## References
+
+https://towardsdatascience.com/an-introduction-to-t-sne-with-python-example-5a3a293108d1 
+
+https://builtin.com/data-science/step-step-explanation-principal-component-analysis
+
+https://docs.displayr.com/wiki/Kaiser_Rule
+
+https://github.com/jkrijthe/Rtsne/issues/12
+
+https://en.wikipedia.org/wiki/Principal_component_analysis
